@@ -146,3 +146,90 @@ def get_volume_project_rw(data: NLOSCaptureData, depths: Union[float, list]):
         raise AssertionError('This function only works with GridFormat.X_Y_3')
 
     return volume_xyz
+
+def get_volume_project_rw_parallel(data: NLOSCaptureData, depths, orient_towards="sensor", project_to_plane=False):
+    """
+    Generate a volume whose slices are parallel to the relay wall.
+
+    Instead of setting z = depth, this offsets the relay-wall grid points
+    along the estimated wall normal.
+
+    Parameters
+    ----------
+    data ==>  NLOSCaptureData
+        - Capture data containing data.laser_grid_xyz.
+    depths: float or list/array of float
+        - Distances from the relay wall along its normal.
+    orient_towards ==> str or None
+        - "sensor": orient the normal towards data.sensor_xyz.
+        - "laser": orient the normal towards data.laser_xyz.
+        - None: keep the SVD normal orientation.
+    project_to_plane ==> bool
+        - If False, use the original laser_grid_xyz points as the base surface.
+        - If True, first project the laser grid onto the best-fit plane.
+
+    Returns
+    -------
+    volume_xyz : np.ndarray
+        Shape (sx, sy, len(depths), 3)
+    normal : np.ndarray
+        Estimated relay-wall normal.
+    origin : np.ndarray
+        Center point used for the plane fit.
+    """
+    import numpy as np
+    from tal.enums import GridFormat
+
+    if isinstance(depths, (int, float)):
+        depths = [depths]
+
+    depths = np.asarray(depths, dtype=float)
+
+    if data.laser_grid_format != GridFormat.X_Y_3:
+        raise AssertionError("Use laser grid format GridFormat.X_Y_3")
+
+    laser_grid = np.asarray(data.laser_grid_xyz, dtype=float)
+    sx, sy, _ = laser_grid.shape
+
+    points = laser_grid.reshape(-1, 3)
+
+    origin = points.mean(axis=0)
+
+    centered = points - origin
+    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+
+    normal = Vt[-1]
+    normal = normal / np.linalg.norm(normal)
+
+    if orient_towards == "sensor":
+        sensor = np.asarray(data.sensor_xyz, dtype=float).reshape(-1, 3).mean(axis=0)
+        if np.dot(sensor - origin, normal) < 0:
+            normal = -normal
+
+    elif orient_towards == "laser":
+        laser = np.asarray(data.laser_xyz, dtype=float).reshape(-1, 3).mean(axis=0)
+        if np.dot(laser - origin, normal) < 0:
+            normal = -normal
+
+    elif orient_towards is None:
+        pass
+
+    else:
+        raise ValueError('orient_towards must be "sensor", "laser", or None')
+
+    if project_to_plane:
+        # Project every relay-wall point onto the best-fit plane.
+        # This gives perfectly planar slices, without modifying data.laser_grid_xyz.
+        dist_to_plane = np.sum((laser_grid - origin) * normal, axis=-1, keepdims=True)
+        base_grid = laser_grid - dist_to_plane * normal
+    else:
+        # Use the measured relay-wall grid directly.
+        # Slices are offset copies of this grid.
+        base_grid = laser_grid
+
+    volume_xyz = np.zeros((sx, sy, len(depths), 3), dtype=float)
+
+    for k, d in enumerate(depths):
+        volume_xyz[:, :, k, :] = base_grid + d * normal
+
+    return volume_xyz, normal, origin

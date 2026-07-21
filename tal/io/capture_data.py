@@ -274,12 +274,19 @@ class NLOSCaptureData:
         own_dict_keys = self.__get_dict_keys()
         for key, value in raw_data.items():
             if key not in own_dict_keys:
-                raise AssertionError(f'raw_data contains unknown key: {key}')
+                print(f'WARNING: raw_data contains unknown key, ignoring: {key}')
+                #raise AssertionError(f'raw_data contains unknown key: {key}')
             if key == 'scene_info' or key == 'noise_info' or key == 'jitter':
                 if isinstance(value, h5py.Empty) or isinstance(value, dict):
                     pass
                 else:
-                    value = yaml.load(value, Loader=yaml.CLoader)
+                    try:
+                        value = yaml.load(value, Loader=yaml.CLoader)
+                    except yaml.YAMLError as e:
+                        print(f"Warning: could not parse YAML field {key}: {e}")
+                        # Keep the raw value instead of crashing
+                        if isinstance(value, bytes):
+                            value = value.decode("utf-8", errors="replace")
 
             setattr(self, key, value)
 
