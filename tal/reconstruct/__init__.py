@@ -147,40 +147,56 @@ def get_volume_project_rw(data: NLOSCaptureData, depths: Union[float, list]):
 
     return volume_xyz
 
-def get_volume_project_rw_parallel(data: NLOSCaptureData, depths, orient_towards="sensor", project_to_plane=False):
+def get_volume_project_rw_parallel( data: NLOSCaptureData, depths, orient_towards="sensor", 
+                                   project_to_plane=False, expand_x=0, expand_y=0):
     """
-    Generate a volume whose slices are parallel to the relay wall.
-
-    Instead of setting z = depth, this offsets the relay-wall grid points
-    along the estimated wall normal.
+    Generate a volume whose slices are parallel to the relay wall,
+    optionally extending the relay-wall grid along its two grid axes.
 
     Parameters
     ----------
-    data ==>  NLOSCaptureData
-        - Capture data containing data.laser_grid_xyz.
-    depths: float or list/array of float
-        - Distances from the relay wall along its normal.
-    orient_towards ==> str or None
-        - "sensor": orient the normal towards data.sensor_xyz.
-        - "laser": orient the normal towards data.laser_xyz.
-        - None: keep the SVD normal orientation.
-    project_to_plane ==> bool
-        - If False, use the original laser_grid_xyz points as the base surface.
-        - If True, first project the laser grid onto the best-fit plane.
+    data : NLOSCaptureData
+        Capture data containing data.laser_grid_xyz.
+
+    depths : float or list/array of float
+        Distances from the relay wall along its normal.
+
+    orient_towards : str or None
+        "sensor": orient the normal towards data.sensor_xyz.
+        "laser": orient the normal towards data.laser_xyz.
+        None: keep the SVD normal orientation.
+
+    project_to_plane : bool
+        If True, project the original grid onto the best-fit plane
+        before extending it.
+
+    expand_x : int
+        Number of points added at each side of axis 0.
+
+    expand_y : int
+        Number of points added at each side of axis 1.
 
     Returns
     -------
     volume_xyz : np.ndarray
-        Shape (sx, sy, len(depths), 3)
+        Shape:
+        (
+            sx + 2*expand_x,
+            sy + 2*expand_y,
+            len(depths),
+            3
+        )
+
     normal : np.ndarray
-        Estimated relay-wall normal.
+        Relay-wall normal.
+
     origin : np.ndarray
-        Center point used for the plane fit.
+        Center of the fitted relay-wall plane.
     """
     import numpy as np
     from tal.enums import GridFormat
 
-    if isinstance(depths, (int, float)):
+    if np.isscalar(depths):
         depths = [depths]
 
     depths = np.asarray(depths, dtype=float)
@@ -189,6 +205,7 @@ def get_volume_project_rw_parallel(data: NLOSCaptureData, depths, orient_towards
         raise AssertionError("Use laser grid format GridFormat.X_Y_3")
 
     laser_grid = np.asarray(data.laser_grid_xyz, dtype=float)
+
     sx, sy, _ = laser_grid.shape
 
     points = laser_grid.reshape(-1, 3)
@@ -196,40 +213,95 @@ def get_volume_project_rw_parallel(data: NLOSCaptureData, depths, orient_towards
     origin = points.mean(axis=0)
 
     centered = points - origin
-    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+
+    _, _, Vt = np.linalg.svd(
+        centered,
+        full_matrices=False,
+    )
 
     normal = Vt[-1]
-    normal = normal / np.linalg.norm(normal)
+    normal /= np.linalg.norm(normal)
 
     if orient_towards == "sensor":
-        sensor = np.asarray(data.sensor_xyz, dtype=float).reshape(-1, 3).mean(axis=0)
+
+        sensor = np.asarray(
+            data.sensor_xyz,
+            dtype=float,
+        ).reshape(-1, 3).mean(axis=0)
+
         if np.dot(sensor - origin, normal) < 0:
             normal = -normal
 
     elif orient_towards == "laser":
-        laser = np.asarray(data.laser_xyz, dtype=float).reshape(-1, 3).mean(axis=0)
+
+        laser = np.asarray(
+            data.laser_xyz,
+            dtype=float,
+        ).reshape(-1, 3).mean(axis=0)
+
         if np.dot(laser - origin, normal) < 0:
             normal = -normal
 
-    elif orient_towards is None:
-        pass
+    elif orient_towards is not None:
 
-    else:
-        raise ValueError('orient_towards must be "sensor", "laser", or None')
+        raise ValueError(
+            'orient_towards must be "sensor", "laser", or None'
+        )
+
 
     if project_to_plane:
-        # Project every relay-wall point onto the best-fit plane.
-        # This gives perfectly planar slices, without modifying data.laser_grid_xyz.
-        dist_to_plane = np.sum((laser_grid - origin) * normal, axis=-1, keepdims=True)
-        base_grid = laser_grid - dist_to_plane * normal
+
+        distance = np.sum(
+            (laser_grid - origin) * normal,
+            axis=-1,
+            keepdims=True,
+        )
+
+        base_grid = laser_grid - distance * normal
+
     else:
-        # Use the measured relay-wall grid directly.
-        # Slices are offset copies of this grid.
-        base_grid = laser_grid
+        base_grid = laser_grid.copy()
 
-    volume_xyz = np.zeros((sx, sy, len(depths), 3), dtype=float)
 
-    for k, d in enumerate(depths):
-        volume_xyz[:, :, k, :] = base_grid + d * normal
+    dx_all = base_grid[1:, :, :] - base_grid[:-1, :, :]
+
+    dx = np.mean(
+        dx_all.reshape(-1, 3),
+        axis=0,
+    )
+
+    dy_all = base_grid[:, 1:, :] - base_grid[:, :-1, :]
+
+    dy = np.mean(
+        dy_all.reshape(-1, 3),
+        axis=0,
+    )
+
+    dx = dx - np.dot(dx, normal) * normal
+    dy = dy - np.dot(dy, normal) * normal
+
+    new_sx = sx + 2 * expand_x
+    new_sy = sy + 2 * expand_y
+
+    extended_grid = np.empty(
+        (new_sx, new_sy, 3),
+        dtype=float,
+    )
+
+    ix = np.arange(-expand_x, sx + expand_x)
+    iy = np.arange(-expand_y, sy + expand_y)
+
+    p0 = base_grid[0, 0]
+
+    extended_grid = (
+        p0[None, None, :]
+        + ix[:, None, None] * dx[None, None, :]
+        + iy[None, :, None] * dy[None, None, :]
+    )
+    volume_xyz = (
+        extended_grid[:, :, None, :]
+        + depths[None, None, :, None]
+        * normal[None, None, None, :]
+    )
 
     return volume_xyz, normal, origin
